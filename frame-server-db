@@ -1,0 +1,1019 @@
+// server.js - Complete Friends n Funds Frame Server
+import express from 'express';
+import { ethers } from 'ethers';
+import satori from 'satori';
+import sharp from 'sharp';
+import QRCode from 'qrcode';
+import { Pool } from 'pg';
+import Redis from 'redis';
+import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import dotenv from 'dotenv';
+import { validateFrameMessage } from '@farcaster/frame-sdk';
+
+dotenv.config();
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+app.use(helmet());
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use('/api/', limiter);
+
+// Configuration
+const BASE_URL = process.env.BASE_URL || 'https://friendsnfunds.xyz';
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const RPC_URL = process.env.RPC_URL;
+const CHAIN_ID = parseInt(process.env.CHAIN_ID || '8453'); // Base mainnet
+
+// Database setup
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Redis setup for session management
+const redis = Redis.createClient({
+  url: process.env.REDIS_URL
+});
+redis.connect();
+
+// Ethereum provider setup
+const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+
+// Contract ABI
+const CONTRACT_ABI = [
+  "function createGame(address _depositToken, uint256 _duration, uint256 _minimumDeposit, uint256 _maximumPlayers, address _yieldStrategy, string memory _metadataURI) external returns (uint256)",
+  "function joinGame(uint256 gameId, uint256 amount) external",
+  "function selectWinner(uint256 gameId, address winner) external",
+  "function selectRandomWinner(uint256 gameId) external",
+  "function withdrawPrincipal(uint256 gameId) external",
+  "function claimYield(uint256 gameId) external",
+  "function getGameInfo(uint256 gameId) external view returns (tuple(uint256 id, address creator, address[] players, address depositToken, uint256 totalDeposited, uint256 minimumDeposit, uint256 maximumPlayers, uint256 startTime, uint256 duration, address winner, bool winnerSelected, bool isActive, uint256 totalYield, string metadataURI))",
+  "function getPlayerDeposit(uint256 gameId, address player) external view returns (uint256)",
+  "function getUserGames(address user) external view returns (uint256[] memory)"
+];
+
+const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+
+// Supported tokens configuration
+const SUPPORTED_TOKENS = {
+  'USDC': {
+    address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // Base USDC
+    decimals: 6,
+    symbol: 'USDC'
+  },
+  'ETH': {
+    address: '0x0000000000000000000000000000000000000000',
+    decimals: 18,
+    symbol: 'ETH'
+  }
+};
+
+// Database initialization
+async function initDatabase() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      fid INTEGER PRIMARY KEY,
+      wallet_address VARCHAR(42),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE TABLE IF NOT EXISTS games (
+      id SERIAL PRIMARY KEY,
+      game_id INTEGER UNIQUE NOT NULL,
+      creator_fid INTEGER REFERENCES users(fid),
+      cast_hash VARCHAR(255),
+      deposit_token VARCHAR(42),
+      duration INTEGER,
+      minimum_deposit DECIMAL(36, 18),
+      maximum_players INTEGER,
+      status VARCHAR(50) DEFAULT 'active',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      expires_at TIMESTAMP
+    );
+    
+    CREATE TABLE IF NOT EXISTS game_participants (
+      game_id INTEGER REFERENCES games(game_id),
+      fid INTEGER REFERENCES users(fid),
+      wallet_address VARCHAR(42),
+      deposit_amount DECIMAL(36, 18),
+      joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      has_withdrawn BOOLEAN DEFAULT FALSE,
+      PRIMARY KEY (game_id, fid)
+    );
+    
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id VARCHAR(64) PRIMARY KEY,
+      fid INTEGER,
+      action VARCHAR(50),
+      data JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      expires_at TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_games_creator ON games(creator_fid);
+    CREATE INDEX IF NOT EXISTS idx_games_status ON games(status);
+    CREATE INDEX IF NOT EXISTS idx_participants_fid ON game_participants(fid);
+  `);
+}
+
+// Image generation with better styling
+async function generateFrameImage(title, subtitle = '', data = {}) {
+  const gradients = {
+    default: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    success: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+    error: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
+    game: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)'
+  };
+  
+  const gradient = gradients[data.type] || gradients.default;
+  
+  const svg = await satori(
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: gradient,
+      padding: '60px',
+      fontFamily: 'Inter'
+    }}>
+      <div style={{
+        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+        borderRadius: '20px',
+        padding: '40px 60px',
+        boxShadow: '0 20px 40px rgba(0, 0, 0, 0.1)',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        maxWidth: '900px'
+      }}>
+        <h1 style={{ 
+          fontSize: '56px', 
+          margin: '0 0 20px 0',
+          background: gradient,
+          backgroundClip: 'text',
+          color: 'transparent'
+        }}>
+          {title}
+        </h1>
+        
+        {subtitle && (
+          <p style={{ 
+            fontSize: '24px', 
+            color: '#666',
+            margin: '0 0 30px 0',
+            textAlign: 'center'
+          }}>
+            {subtitle}
+          </p>
+        )}
+        
+        {data.gameInfo && (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '15px',
+            fontSize: '20px',
+            color: '#333',
+            width: '100%',
+            marginTop: '20px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>💰 Total Pool:</span>
+              <strong>{data.gameInfo.totalPool}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>👥 Players:</span>
+              <strong>{data.gameInfo.players}/{data.gameInfo.maxPlayers}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>📈 Current APY:</span>
+              <strong>{data.gameInfo.apy}%</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>⏱️ Time Left:</span>
+              <strong>{data.gameInfo.timeLeft}</strong>
+            </div>
+          </div>
+        )}
+        
+        {data.qrCode && (
+          <img 
+            src={data.qrCode} 
+            width="200" 
+            height="200" 
+            style={{ marginTop: '30px' }}
+          />
+        )}
+        
+        {data.gameId && (
+          <div style={{
+            marginTop: '30px',
+            padding: '15px 30px',
+            backgroundColor: '#f0f0f0',
+            borderRadius: '10px',
+            fontSize: '24px',
+            fontFamily: 'monospace'
+          }}>
+            Game ID: {data.gameId}
+          </div>
+        )}
+      </div>
+    </div>,
+    {
+      width: 1200,
+      height: 630,
+      fonts: [] // Add custom fonts if needed
+    }
+  );
+
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+// Frame validation middleware
+async function validateFrame(req, res, next) {
+  try {
+    const { trustedData } = req.body;
+    if (trustedData) {
+      // Validate Farcaster signature
+      const isValid = await validateFrameMessage(trustedData);
+      if (!isValid) {
+        return res.status(401).json({ error: 'Invalid frame signature' });
+      }
+    }
+    next();
+  } catch (error) {
+    console.error('Frame validation error:', error);
+    next(); // Continue anyway for development
+  }
+}
+
+// Initial frame HTML
+app.get('/frame', async (req, res) => {
+  const imageUrl = `${BASE_URL}/api/frame-image/welcome`;
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta property="fc:frame" content="vNext" />
+        <meta property="fc:frame:image" content="${imageUrl}" />
+        <meta property="fc:frame:button:1" content="🎮 Create Game" />
+        <meta property="fc:frame:button:2" content="🎯 Join Game" />
+        <meta property="fc:frame:button:3" content="📊 My Games" />
+        <meta property="fc:frame:button:4" content="🏆 Leaderboard" />
+        <meta property="fc:frame:post_url" content="${BASE_URL}/api/frame/action" />
+        <meta property="og:title" content="Friends n Funds" />
+        <meta property="og:description" content="Social yield gaming on Farcaster" />
+      </head>
+      <body>Friends n Funds - Pool funds with friends, compete for yield!</body>
+    </html>
+  `);
+});
+
+// Main frame action handler
+app.post('/api/frame/action', validateFrame, async (req, res) => {
+  const { untrustedData } = req.body;
+  const { fid, buttonIndex, inputText } = untrustedData;
+  
+  try {
+    // Get or create user state
+    const stateKey = `frame_state:${fid}`;
+    let state = await redis.get(stateKey);
+    state = state ? JSON.parse(state) : { screen: 'home' };
+    
+    // Handle navigation based on current screen and button
+    const response = await handleFrameAction(state, buttonIndex, inputText, fid);
+    
+    // Save updated state
+    await redis.setex(stateKey, 3600, JSON.stringify(response.state || state));
+    
+    res.json(response.frame);
+  } catch (error) {
+    console.error('Frame action error:', error);
+    res.json(await getErrorFrame(error.message));
+  }
+});
+
+// Frame action routing
+async function handleFrameAction(state, buttonIndex, inputText, fid) {
+  switch (state.screen) {
+    case 'home':
+      return handleHomeScreen(buttonIndex, fid);
+      
+    case 'create_select_token':
+      return handleCreateSelectToken(state, buttonIndex, fid);
+      
+    case 'create_set_params':
+      return handleCreateSetParams(state, buttonIndex, inputText, fid);
+      
+    case 'create_confirm':
+      return handleCreateConfirm(state, buttonIndex, fid);
+      
+    case 'join_enter_id':
+      return handleJoinEnterId(state, buttonIndex, inputText, fid);
+      
+    case 'join_confirm':
+      return handleJoinConfirm(state, buttonIndex, fid);
+      
+    case 'my_games':
+      return handleMyGames(state, buttonIndex, fid);
+      
+    case 'game_details':
+      return handleGameDetails(state, buttonIndex, fid);
+      
+    default:
+      return { frame: await getHomeFrame(), state: { screen: 'home' } };
+  }
+}
+
+// Screen handlers
+async function handleHomeScreen(buttonIndex, fid) {
+  switch (buttonIndex) {
+    case 1: // Create Game
+      return {
+        frame: await getCreateSelectTokenFrame(),
+        state: { screen: 'create_select_token' }
+      };
+      
+    case 2: // Join Game
+      return {
+        frame: await getJoinEnterIdFrame(),
+        state: { screen: 'join_enter_id' }
+      };
+      
+    case 3: // My Games
+      const games = await getUserGames(fid);
+      return {
+        frame: await getMyGamesFrame(games),
+        state: { screen: 'my_games', games }
+      };
+      
+    case 4: // Leaderboard
+      const leaderboard = await getLeaderboard();
+      return {
+        frame: await getLeaderboardFrame(leaderboard),
+        state: { screen: 'leaderboard' }
+      };
+      
+    default:
+      return { frame: await getHomeFrame(), state: { screen: 'home' } };
+  }
+}
+
+async function handleCreateSelectToken(state, buttonIndex, fid) {
+  if (buttonIndex === 4) { // Back button
+    return { frame: await getHomeFrame(), state: { screen: 'home' } };
+  }
+  
+  const tokens = ['USDC', 'ETH', 'DAI'];
+  const selectedToken = tokens[buttonIndex - 1];
+  
+  return {
+    frame: await getCreateSetParamsFrame(selectedToken),
+    state: { 
+      screen: 'create_set_params',
+      token: selectedToken
+    }
+  };
+}
+
+async function handleCreateSetParams(state, buttonIndex, inputText, fid) {
+  if (buttonIndex === 4) { // Back button
+    return {
+      frame: await getCreateSelectTokenFrame(),
+      state: { screen: 'create_select_token' }
+    };
+  }
+  
+  // Parse input parameters (format: "minDeposit,maxPlayers,durationDays")
+  const params = inputText.split(',').map(p => p.trim());
+  if (params.length !== 3) {
+    return {
+      frame: await getErrorFrame('Invalid format. Use: minDeposit,maxPlayers,durationDays'),
+      state: state
+    };
+  }
+  
+  const [minDeposit, maxPlayers, durationDays] = params;
+  
+  // Generate session for wallet connection
+  const sessionId = generateSessionId();
+  await redis.setex(
+    `session:${sessionId}`,
+    600, // 10 minutes
+    JSON.stringify({
+      fid,
+      action: 'create_game',
+      params: {
+        token: state.token,
+        minDeposit: parseFloat(minDeposit),
+        maxPlayers: parseInt(maxPlayers),
+        duration: parseInt(durationDays) * 24 * 60 * 60 // Convert to seconds
+      }
+    })
+  );
+  
+  return {
+    frame: await getWalletConnectFrame(sessionId),
+    state: {
+      ...state,
+      screen: 'create_confirm',
+      sessionId,
+      params: {
+        minDeposit,
+        maxPlayers,
+        durationDays
+      }
+    }
+  };
+}
+
+// Helper functions
+function generateSessionId() {
+  return Date.now().toString(36) + Math.random().toString(36).substr(2);
+}
+
+async function getUserWallet(fid) {
+  const result = await db.query(
+    'SELECT wallet_address FROM users WHERE fid = $1',
+    [fid]
+  );
+  return result.rows[0]?.wallet_address;
+}
+
+async function getUserGames(fid) {
+  const result = await db.query(`
+    SELECT g.*, 
+           COUNT(DISTINCT gp.fid) as player_count,
+           COALESCE(SUM(gp.deposit_amount), 0) as total_deposited
+    FROM games g
+    LEFT JOIN game_participants gp ON g.game_id = gp.game_id
+    WHERE g.creator_fid = $1 OR gp.fid = $1
+    GROUP BY g.id
+    ORDER BY g.created_at DESC
+    LIMIT 10
+  `, [fid]);
+  
+  return result.rows;
+}
+
+async function getLeaderboard() {
+  const result = await db.query(`
+    SELECT u.fid,
+           COUNT(DISTINCT gp.game_id) as games_played,
+           COUNT(DISTINCT CASE WHEN g.winner_fid = u.fid THEN g.game_id END) as games_won,
+           COALESCE(SUM(CASE WHEN g.winner_fid = u.fid THEN g.total_yield END), 0) as total_yield_won
+    FROM users u
+    LEFT JOIN game_participants gp ON u.fid = gp.fid
+    LEFT JOIN games g ON gp.game_id = g.game_id
+    GROUP BY u.fid
+    ORDER BY total_yield_won DESC
+    LIMIT 20
+  `);
+  
+  return result.rows;
+}
+
+// Frame builders
+async function getHomeFrame() {
+  return {
+    image: `${BASE_URL}/api/frame-image/welcome`,
+    buttons: [
+      { label: "🎮 Create Game", action: "post" },
+      { label: "🎯 Join Game", action: "post" },
+      { label: "📊 My Games", action: "post" },
+      { label: "🏆 Leaderboard", action: "post" }
+    ],
+    post_url: `${BASE_URL}/api/frame/action`
+  };
+}
+
+async function getCreateSelectTokenFrame() {
+  return {
+    image: `${BASE_URL}/api/frame-image/select-token`,
+    buttons: [
+      { label: "USDC", action: "post" },
+      { label: "ETH", action: "post" },
+      { label: "DAI", action: "post" },
+      { label: "↩️ Back", action: "post" }
+    ],
+    post_url: `${BASE_URL}/api/frame/action`
+  };
+}
+
+async function getCreateSetParamsFrame(token) {
+  return {
+    image: `${BASE_URL}/api/frame-image/set-params?token=${token}`,
+    input: {
+      text: "minDeposit,maxPlayers,durationDays (e.g., 100,10,7)"
+    },
+    buttons: [
+      { label: "Continue", action: "post" },
+      { label: "↩️ Back", action: "post" }
+    ],
+    post_url: `${BASE_URL}/api/frame/action`
+  };
+}
+
+async function getWalletConnectFrame(sessionId) {
+  const connectUrl = `${BASE_URL}/connect/${sessionId}`;
+  const qrCode = await QRCode.toDataURL(connectUrl);
+  
+  return {
+    image: `${BASE_URL}/api/frame-image/connect-wallet?qr=${encodeURIComponent(qrCode)}`,
+    buttons: [
+      { 
+        label: "🔗 Connect Wallet", 
+        action: "post_redirect",
+        target: connectUrl
+      },
+      { label: "✓ I'm Connected", action: "post" },
+      { label: "↩️ Back", action: "post" }
+    ],
+    post_url: `${BASE_URL}/api/frame/action`
+  };
+}
+
+async function getErrorFrame(message) {
+  return {
+    image: `${BASE_URL}/api/frame-image/error?message=${encodeURIComponent(message)}`,
+    buttons: [
+      { label: "🏠 Home", action: "post" }
+    ],
+    post_url: `${BASE_URL}/api/frame/action`
+  };
+}
+
+// Image generation endpoints
+app.get('/api/frame-image/:type', async (req, res) => {
+  const { type } = req.params;
+  const { token, qr, message, gameId } = req.query;
+  
+  try {
+    let image;
+    
+    switch (type) {
+      case 'welcome':
+        image = await generateFrameImage(
+          'Friends n Funds',
+          'Pool funds with friends, compete for yield!',
+          { type: 'default' }
+        );
+        break;
+        
+      case 'select-token':
+        image = await generateFrameImage(
+          'Select Token',
+          'Choose the token for your game pool',
+          { type: 'default' }
+        );
+        break;
+        
+      case 'set-params':
+        image = await generateFrameImage(
+          `Create ${token} Game`,
+          'Set your game parameters',
+          { type: 'default' }
+        );
+        break;
+        
+      case 'connect-wallet':
+        image = await generateFrameImage(
+          'Connect Your Wallet',
+          'Scan QR code or click button to connect',
+          { type: 'default', qrCode: qr }
+        );
+        break;
+        
+      case 'error':
+        image = await generateFrameImage(
+          'Error',
+          message || 'Something went wrong',
+          { type: 'error' }
+        );
+        break;
+        
+      case 'game-created':
+        image = await generateFrameImage(
+          'Game Created! 🎉',
+          'Share this ID with friends',
+          { type: 'success', gameId }
+        );
+        break;
+        
+      default:
+        image = await generateFrameImage('Friends n Funds');
+    }
+    
+    res.set('Content-Type', 'image/png');
+    res.set('Cache-Control', 'max-age=3600');
+    res.send(image);
+  } catch (error) {
+    console.error('Image generation error:', error);
+    res.status(500).send('Error generating image');
+  }
+});
+
+// Wallet connection page
+app.get('/connect/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Connect Wallet - Friends n Funds</title>
+        <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+          }
+          
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+          }
+          
+          .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+          }
+          
+          h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 28px;
+          }
+          
+          .wallet-options {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin: 30px 0;
+          }
+          
+          .wallet-btn {
+            background: #f7f7f7;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            font-size: 18px;
+            font-weight: 500;
+          }
+          
+          .wallet-btn:hover {
+            border-color: #667eea;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+          }
+          
+          .wallet-btn img {
+            width: 40px;
+            height: 40px;
+          }
+          
+          .status {
+            margin-top: 30px;
+            padding: 20px;
+            border-radius: 10px;
+            font-size: 16px;
+          }
+          
+          .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+          }
+          
+          .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+          }
+          
+          .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+          }
+          
+          .address {
+            font-family: monospace;
+            font-size: 14px;
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            word-break: break-all;
+          }
+          
+          .loader {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+          }
+          
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Connect Your Wallet</h1>
+          <p style="color: #666; margin-bottom: 30px;">
+            Connect your wallet to create or join games
+          </p>
+          
+          <div class="wallet-options">
+            <button class="wallet-btn" onclick="connectWallet('metamask')">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg" alt="MetaMask">
+              <span>MetaMask</span>
+            </button>
+            
+            <button class="wallet-btn" onclick="connectWallet('walletconnect')">
+              <img src="https://walletconnect.org/walletconnect-logo.svg" alt="WalletConnect">
+              <span>WalletConnect</span>
+            </button>
+            
+            <button class="wallet-btn" onclick="connectWallet('coinbase')">
+              <img src="https://www.coinbase.com/img/logo.svg" alt="Coinbase">
+              <span>Coinbase Wallet</span>
+            </button>
+          </div>
+          
+          <div id="status"></div>
+        </div>
+        
+        <script>
+          const sessionId = '${sessionId}';
+          const CHAIN_ID = ${CHAIN_ID};
+          const CHAIN_NAME = 'Base';
+          
+          async function connectWallet(walletType) {
+            const statusEl = document.getElementById('status');
+            statusEl.innerHTML = '<div class="loader"></div>';
+            
+            try {
+              let provider;
+              let signer;
+              
+              if (walletType === 'metamask' && window.ethereum) {
+                // MetaMask connection
+                await window.ethereum.request({ method: 'eth_requestAccounts' });
+                provider = new ethers.providers.Web3Provider(window.ethereum);
+                
+                // Check if on correct chain
+                const network = await provider.getNetwork();
+                if (network.chainId !== CHAIN_ID) {
+                  // Switch to Base
+                  try {
+                    await window.ethereum.request({
+                      method: 'wallet_switchEthereumChain',
+                      params: [{ chainId: '0x' + CHAIN_ID.toString(16) }],
+                    });
+                  } catch (switchError) {
+                    // Chain not added, add it
+                    if (switchError.code === 4902) {
+                      await window.ethereum.request({
+                        method: 'wallet_addEthereumChain',
+                        params: [{
+                          chainId: '0x' + CHAIN_ID.toString(16),
+                          chainName: CHAIN_NAME,
+                          nativeCurrency: {
+                            name: 'Ethereum',
+                            symbol: 'ETH',
+                            decimals: 18
+                          },
+                          rpcUrls: ['https://mainnet.base.org'],
+                          blockExplorerUrls: ['https://basescan.org']
+                        }],
+                      });
+                    } else {
+                      throw switchError;
+                    }
+                  }
+                }
+                
+                signer = provider.getSigner();
+              } else if (walletType === 'coinbase') {
+                // Coinbase Wallet connection
+                // Implementation depends on Coinbase Wallet SDK
+                statusEl.innerHTML = '<div class="status info">Coinbase Wallet connection coming soon!</div>';
+                return;
+              } else if (walletType === 'walletconnect') {
+                // WalletConnect connection
+                statusEl.innerHTML = '<div class="status info">WalletConnect integration coming soon!</div>';
+                return;
+              } else {
+                throw new Error('Wallet not found. Please install ' + walletType);
+              }
+              
+              const address = await signer.getAddress();
+              
+              // Send connection info to server
+              const response = await fetch('/api/wallet/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  sessionId: sessionId,
+                  address: address,
+                  chainId: CHAIN_ID
+                })
+              });
+              
+              if (response.ok) {
+                statusEl.innerHTML = \`
+                  <div class="status success">
+                    ✅ Wallet connected successfully!
+                    <div class="address">\${address}</div>
+                    <p style="margin-top: 15px;">You can now return to Farcaster and continue.</p>
+                  </div>
+                \`;
+                
+                // Auto-close after 3 seconds
+                setTimeout(() => {
+                  window.close();
+                }, 3000);
+              } else {
+                throw new Error('Failed to save connection');
+              }
+              
+            } catch (error) {
+              console.error('Connection error:', error);
+              statusEl.innerHTML = \`
+                <div class="status error">
+                  ❌ Connection failed: \${error.message}
+                </div>
+              \`;
+            }
+          }
+          
+          // Check if MetaMask is installed
+          window.addEventListener('load', () => {
+            if (!window.ethereum) {
+              document.querySelector('.wallet-btn').style.opacity = '0.5';
+            }
+          });
+        </script>
+      </body>
+    </html>
+  `);
+});
+
+// Wallet connection API endpoint
+app.post('/api/wallet/connect', async (req, res) => {
+  const { sessionId, address, chainId } = req.body;
+  
+  try {
+    // Get session data
+    const sessionData = await redis.get(`session:${sessionId}`);
+    if (!sessionData) {
+      return res.status(404).json({ error: 'Session expired' });
+    }
+    
+    const session = JSON.parse(sessionData);
+    const { fid, action, params } = session;
+    
+    // Save wallet address to database
+    await db.query(`
+      INSERT INTO users (fid, wallet_address, last_active)
+      VALUES ($1, $2, CURRENT_TIMESTAMP)
+      ON CONFLICT (fid) 
+      DO UPDATE SET wallet_address = $2, last_active = CURRENT_TIMESTAMP
+    `, [fid, address.toLowerCase()]);
+    
+    // Mark session as connected
+    session.connected = true;
+    session.address = address;
+    await redis.setex(`session:${sessionId}`, 300, JSON.stringify(session));
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Wallet connection error:', error);
+    res.status(500).json({ error: 'Failed to connect wallet' });
+  }
+});
+
+// API endpoints for game operations
+app.post('/api/game/create', async (req, res) => {
+  const { sessionId } = req.body;
+  
+  try {
+    const sessionData = await redis.get(`session:${sessionId}`);
+    if (!sessionData) {
+      return res.status(404).json({ error: 'Session expired' });
+    }
+    
+    const session = JSON.parse(sessionData);
+    if (!session.connected) {
+      return res.status(400).json({ error: 'Wallet not connected' });
+    }
+    
+    const { fid, address, params } = session;
+    
+    // Create signer from stored private key (in production, use proper key management)
+    const signer = new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
+    
+    // Get token address
+    const tokenInfo = SUPPORTED_TOKENS[params.token];
+    const tokenAddress = tokenInfo.address;
+    
+    // Call contract to create game
+    const tx = await contract.connect(signer).createGame(
+      tokenAddress,
+      params.duration,
+      ethers.utils.parseUnits(params.minDeposit.toString(), tokenInfo.decimals),
+      params.maxPlayers,
+      process.env.AAVE_STRATEGY_ADDRESS, // Use configured yield strategy
+      `ipfs://` // Metadata URI - implement IPFS upload
+    );
+    
+    const receipt = await tx.wait();
+    
+    // Extract game ID from events
+    const event = receipt.events.find(e => e.event === 'GameCreated');
+    const gameId = event.args.gameId.toNumber();
+    
+    // Save to database
+    await db.query(`
+      INSERT INTO games (
+        game_id, creator_fid, deposit_token, duration, 
+        minimum_deposit, maximum_players, expires_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, [
+      gameId,
+      fid,
+      tokenAddress,
+      params.duration,
+      params.minDeposit,
+      params.maxPlayers,
+      new Date(Date.now() + params.duration * 1000)
+    ]);
+    
+    res.json({ success: true, gameId });
+  } catch (error) {
+    console.error('Game creation error:', error);
+    res.status(500).json({ error: 'Failed to create game' });
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Initialize and start server
+async function start() {
+  try {
+    await initDatabase();
+    console.log('Database initialized');
+    
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      console.log(`Friends n Funds server running on port ${PORT}`);
+      console.log(`Frame URL: ${BASE_URL}/frame`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+start();
