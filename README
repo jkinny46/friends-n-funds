@@ -1,0 +1,282 @@
+# Friends n Funds 🎮💰
+
+A social yield gaming platform built on Farcaster Frames where friends pool crypto assets, earn yield together, and compete for collective returns while preserving everyone's principal.
+
+![Friends n Funds Banner](https://friendsnfunds.xyz/banner.png)
+
+## 🌟 Features
+
+- **Social Gaming**: Create or join yield games with friends directly in Farcaster
+- **Principal Protection**: All users get their initial deposits back - only yield is at stake
+- **Multi-Asset Support**: Pool USDC, ETH, DAI, and more
+- **Automated Yield**: Integration with Aave, Compound, and Yearn for optimal returns
+- **Transparent & Fair**: On-chain escrow with verifiable randomness for winner selection
+- **Mobile Optimized**: Seamless experience across all devices
+
+## 🚀 Quick Start
+
+### For Users
+
+1. **Find a Friends n Funds cast on Farcaster**
+2. **Click "Create Game" or "Join Game"**
+3. **Connect your wallet** (MetaMask, WalletConnect, Coinbase Wallet)
+4. **Deposit assets** and wait for the game duration
+5. **Winner takes the yield**, everyone else gets their principal back!
+
+### For Developers
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/friends-n-funds.git
+cd friends-n-funds
+
+# Install dependencies
+npm install
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your configuration
+
+# Deploy contracts (testnet)
+npx hardhat run scripts/deploy.js --network base-goerli
+
+# Start the server
+npm run dev
+```
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│                 │     │                 │     │                 │
+│  Farcaster      │────▶│  Frame Server   │────▶│  Smart          │
+│  Client         │     │  (Node.js)      │     │  Contracts      │
+│                 │     │                 │     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+         │                       │                       │
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│                 │     │                 │     │                 │
+│  Wallet         │     │  PostgreSQL     │     │  DeFi           │
+│  Connection     │     │  Database       │     │  Protocols      │
+│  Page           │     │                 │     │  (Aave, etc)    │
+│                 │     │                 │     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+## 🔧 Technical Stack
+
+- **Smart Contracts**: Solidity, OpenZeppelin, Hardhat
+- **Backend**: Node.js, Express, PostgreSQL, Redis
+- **Blockchain**: Base (Ethereum L2)
+- **Frame Rendering**: Satori, Sharp
+- **DeFi Integration**: Aave, Compound, Yearn
+- **Frontend**: Pure HTML/CSS/JS for wallet connection
+
+## 📝 Smart Contract Overview
+
+### FriendsAndFunds.sol
+Main contract handling game logic, deposits, and withdrawals.
+
+```solidity
+// Key functions
+createGame(token, duration, minDeposit, maxPlayers, strategy)
+joinGame(gameId, amount)
+selectWinner(gameId, winner) // Creator selection
+selectRandomWinner(gameId)    // Random selection
+withdrawPrincipal(gameId)
+claimYield(gameId)
+```
+
+### AaveYieldStrategy.sol
+Yield generation strategy using Aave protocol.
+
+```solidity
+// Implements IYieldStrategy
+deposit(token, amount)
+withdraw(token, amount)
+getBalance(token)
+claimYield(token)
+```
+
+## 🔐 Security
+
+- ✅ Audited smart contracts (pending)
+- ✅ Non-custodial design - users maintain control
+- ✅ Emergency withdrawal mechanisms
+- ✅ Rate limiting and input validation
+- ✅ Secure session management
+- ✅ HTTPS/SSL encryption
+
+## 🌐 API Reference
+
+### Frame Endpoints
+
+```http
+GET /frame
+# Initial frame HTML
+
+POST /api/frame/action
+# Handle frame button clicks
+# Body: { untrustedData: { fid, buttonIndex, inputText, castId } }
+
+GET /api/frame-image/:type
+# Generate dynamic frame images
+# Types: welcome, select-token, game-details, etc.
+```
+
+### Wallet Connection
+
+```http
+GET /connect/:sessionId
+# Wallet connection page
+
+POST /api/wallet/connect
+# Save wallet connection
+# Body: { sessionId, address, chainId }
+```
+
+### Game Operations
+
+```http
+POST /api/game/create
+# Create new game
+# Body: { sessionId }
+
+POST /api/game/join
+# Join existing game
+# Body: { sessionId, gameId, amount }
+
+GET /api/game/:gameId
+# Get game details
+```
+
+## 🎮 Game Flow
+
+1. **Create Game**
+   - Select token (USDC, ETH, DAI)
+   - Set parameters (min deposit, max players, duration)
+   - Connect wallet
+   - Deploy game on-chain
+
+2. **Join Game**
+   - Enter game ID
+   - Connect wallet
+   - Approve and deposit tokens
+   - Wait for game to fill or expire
+
+3. **Game Active**
+   - View participants and total pool
+   - Monitor yield generation
+   - See time remaining
+
+4. **Game Complete**
+   - Winner selected (by creator or randomly)
+   - Winner claims yield
+   - All players withdraw principal
+
+## 🚢 Deployment
+
+### Prerequisites
+- Node.js 18+
+- PostgreSQL 14+
+- Redis 6+
+- Base RPC endpoint
+- Farcaster account
+
+### Production Deployment
+
+1. **Set up infrastructure**
+   ```bash
+   # Using Docker
+   docker-compose up -d
+   
+   # Or manual setup
+   npm install --production
+   pm2 start server.js --name friends-funds
+   ```
+
+2. **Configure environment**
+   - Copy `.env.example` to `.env`
+   - Set all required variables
+   - Configure SSL certificates
+
+3. **Deploy contracts**
+   ```bash
+   npx hardhat run scripts/deploy.js --network base
+   npx hardhat verify --network base CONTRACT_ADDRESS
+   ```
+
+4. **Initialize database**
+   ```bash
+   npm run db:migrate
+   ```
+
+5. **Start monitoring**
+   - Set up health checks
+   - Configure alerts
+   - Monitor logs
+
+## 📊 Monitoring
+
+- Health check: `GET /health`
+- Detailed health: `GET /health/detailed`
+- Metrics exported to StatsD/DataDog
+- Structured logging with Winston
+
+## 🤝 Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+
+## 🙏 Acknowledgments
+
+- Farcaster team for the Frames protocol
+- Base team for the L2 infrastructure
+- Aave, Compound, and Yearn for yield generation
+- OpenZeppelin for secure contract libraries
+
+## 📞 Support
+
+- **Discord**: [discord.gg/friendsnfunds](https://discord.gg/friendsnfunds)
+- **Twitter**: [@friendsnfunds](https://twitter.com/friendsnfunds)
+- **Email**: support@friendsnfunds.xyz
+- **Docs**: [docs.friendsnfunds.xyz](https://docs.friendsnfunds.xyz)
+
+## 🗺️ Roadmap
+
+### Phase 1 (Current)
+- [x] Basic game creation and joining
+- [x] Wallet integration
+- [x] Aave yield strategy
+- [x] Frame-based UI
+
+### Phase 2 (Q2 2024)
+- [ ] Multiple yield strategies
+- [ ] Cross-chain support
+- [ ] Tournament mode
+- [ ] Mobile app
+
+### Phase 3 (Q3 2024)
+- [ ] DAO governance
+- [ ] Custom yield strategies
+- [ ] NFT achievements
+- [ ] Advanced analytics
+
+## ⚠️ Disclaimer
+
+Friends n Funds is experimental software. While principal is protected by smart contracts, DeFi protocols carry inherent risks. Please do your own research and never invest more than you can afford to lose.
+
+---
+
+Built with ❤️ for the Farcaster community
