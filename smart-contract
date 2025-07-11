@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+interface IYieldStrategy {
+    function deposit(address token, uint256 amount) external;
+    function withdraw(address token, uint256 amount) external returns (uint256);
+    function getBalance(address token) external view returns (uint256);
+    function claimYield(address token) external returns (uint256);
+}
+
+contract FriendsAndFunds is ReentrancyGuard, Ownable {
+    using SafeERC20 for IERC20;
+    
+    struct Game {
+        uint256 id;
+        address creator;
+        address[] players;
+        mapping(address => uint256) deposits;
+        mapping(address => bool) hasJoined;
+        mapping(address => bool) hasWithdrawn;
+        address depositToken;
+        uint256 totalDeposited;
+        uint256 minimumDeposit;
+        uint256 maximumPlayers;
+        uint256 startTime;
+        uint256 duration;
+        address winner;
+        bool winnerSelected;
+        bool isActive;
+        address yieldStrategy;
+        uint256 totalYield;
+        string metadataURI;
+    }
+    
+    struct GameView {
+        uint256 id;
+        address creator;
+        address[] players;
+        address depositToken;
+        uint256 totalDeposited;
+        uint256 minimumDeposit;
+        uint256 maximumPlayers;
+        uint256 startTime;
+        uint256 duration;
+        address winner;
+        bool winnerSelected;
+        bool isActive;
+        uint256 totalYield;
+        string metadataURI;
+    }
+    
+    uint256 public nextGameId = 1;
+    mapping(uint256 => Game) public games;
+    mapping(address => uint256[]) public userGames;
+    mapping(address => bool) public approvedStrategies;
+    mapping(address => bool) public approvedTokens;
+    
+    uint256 public constant MIN_GAME_DURATION = 1 days;
+    uint256 public constant MAX_GAME_DURATION = 365 days;
+    uint256 public protocolFeePercentage = 100; // 1% = 100 basis points
+    address public feeRecipient;
+    
+    event GameCreated(
+        uint256 indexed gameId,
+        address indexed creator,
+        address depositToken,
+        uint256 duration,
+        uint256 minimumDeposit,
+        uint256 maximumPlayers
+    );
+    
+    event PlayerJoined(
+        uint256 indexed gameId,
+        address indexed player,
+        uint256 amount
+    );
+    
+    event WinnerSelected(
+        uint256 indexed gameId,
+        address indexed winner,
+        uint256 yieldAmount
+    );
+    
+    event FundsWithdrawn(
+        uint256 indexed gameId,
+        address indexed player,
+        uint256 amount
+    );
+    
+    event YieldClaimed(
+        uint256 indexed gameId,
+        address indexed winner,
+        uint256 amount
+    );
+    
+    modifier gameExists(uint256 gameId) {
+        require(games[gameId].isActive || games[gameId].startTime > 0, "Game does not exist");
+        _;
+    }
+    
+    modifier gameActive(uint256 gameId) {
+        require(games[gameId].isActive, "Game is not active");
+        require(block.timestamp < games[gameId].startTime + games[gameId].duration, "Game has ended");
+        _;
+    }
+    
+    modifier gameEnded(uint256 gameId) {
+        require(block.timestamp >= games[gameId].startTime + games[gameId].duration, "Game has not ended");
+        _;
+    }
+    
+    constructor(address _feeRecipient) {
+        feeRecipient = _feeRecipient;
+    }
+    
+    function createGame(
+        address _depositToken,
+        uint256 _duration,
+        uint256 _minimumDeposit,
+        uint256 _maximumPlayers,
+        address _yieldStrategy,
+        string memory _metadataURI
+    ) external returns (uint256) {
+        require(approvedTokens[_depositToken], "Token not approved");
+        require(approvedStrategies[_yieldStrategy], "Strategy not approved");
+        require(_duration >= MIN_GAME_DURATION && _duration <= MAX_GAME_DURATION, "Invalid duration");
+        require(_minimumDeposit > 0, "Minimum deposit must be greater than 0");
+        require(_maximumPlayers >= 2 && _maximumPlayers <= 100, "Invalid max players");
+        
+        uint256 gameId = nextGameId++;
+        Game storage game = games[gameId];
+        
+        game.id = gameId;
+        game.creator = msg.sender;
+        game.depositToken = _depositToken;
+        game.duration = _duration;
+        game.minimumDeposit = _minimumDeposit;
+        game.maximumPlayers = _maximumPlayers;
+        game.yieldStrategy = _yieldStrategy;
+        game.isActive = true;
+        game.metadataURI = _metadataURI;
+        
+        userGames[msg.sender].push(gameId);
+        
+        emit GameCreated(
+            gameId,
+            msg.sender,
+            _depositToken,
+            _duration,
+            _minimumDeposit,
+            _maximumPlayers
+        );
+        
+        return gameId;
+    }
+    
+    function joinGame(uint256 gameId, uint256 amount) 
+        external 
+        nonReentrant 
+        gameExists(gameId) 
+        gameActive(gameId) 
+    {
+        Game storage game = games[gameId];
+        
+        require(!game.hasJoined[msg.sender], "Already joined");
+        require(amount >= game.minimumDeposit, "Amount below minimum");
+        require(game.players.length < game.maximumPlayers, "Game is full");
+        
+        // Transfer tokens from player
+        IERC20(game.depositToken).safeTransferFrom(msg.sender, address(this), amount);
+        
+        // If this is the first player, set start time
+        if (game.players.length == 0) {
+            game.startTime = block.timestamp;
+        }
+        
+        // Update game state
+        game.players.push(msg.sender);
+        game.deposits[msg.sender] = amount;
+        game.hasJoined[msg.sender] = true;
+        game.totalDeposited += amount;
+        
+        // Deposit to yield strategy
+        IERC20(game.depositToken).safeApprove(game.yieldStrategy, amount);
+        IYieldStrategy(game.yieldStrategy).deposit(game.depositToken, amount);
+        
+        userGames[msg.sender].push(gameId);
+        
+        emit PlayerJoined(gameId, msg.sender, amount);
+    }
+    
+    function selectWinner(uint256 gameId, address winner) 
+        external 
+        gameExists(gameId) 
+        gameEnded(gameId) 
+    {
+        Game storage game = games[gameId];
+        
+        require(!game.winnerSelected, "Winner already selected");
+        require(game.hasJoined[winner], "Winner must be a player");
+        require(msg.sender == game.creator, "Only creator can select winner");
+        
+        game.winner = winner;
+        game.winnerSelected = true;
+        
+        // Claim yield from strategy
+        uint256 yieldAmount = IYieldStrategy(game.yieldStrategy).claimYield(game.depositToken);
+        game.totalYield = yieldAmount;
+        
+        emit WinnerSelected(gameId, winner, yieldAmount);
+    }
+    
+    function selectRandomWinner(uint256 gameId) 
+        external 
+        gameExists(gameId) 
+        gameEnded(gameId) 
+    {
+        Game storage game = games[gameId];
+        
+        require(!game.winnerSelected, "Winner already selected");
+        require(game.players.length > 0, "No players in game");
+        
+        // Simple pseudo-random selection (use Chainlink VRF in production)
+        uint256 randomIndex = uint256(keccak256(abi.encodePacked(
+            block.timestamp,
+            block.difficulty,
+            gameId,
+            game.totalDeposited
+        ))) % game.players.length;
+        
+        game.winner = game.players[randomIndex];
+        game.winnerSelected = true;
+        
+        // Claim yield from strategy
+        uint256 yieldAmount = IYieldStrategy(game.yieldStrategy).claimYield(game.depositToken);
+        game.totalYield = yieldAmount;
+        
+        emit WinnerSelected(gameId, game.winner, yieldAmount);
+    }
+    
+    function withdrawPrincipal(uint256 gameId) 
+        external 
+        nonReentrant 
+        gameExists(gameId) 
+        gameEnded(gameId) 
+    {
+        Game storage game = games[gameId];
+        
+        require(game.hasJoined[msg.sender], "Not a player");
+        require(!game.hasWithdrawn[msg.sender], "Already withdrawn");
+        
+        uint256 amount = game.deposits[msg.sender];
+        game.hasWithdrawn[msg.sender] = true;
+        
+        // Withdraw from yield strategy
+        uint256 withdrawn = IYieldStrategy(game.yieldStrategy).withdraw(game.depositToken, amount);
+        
+        // Transfer principal back to player
+        IERC20(game.depositToken).safeTransfer(msg.sender, withdrawn);
+        
+        emit FundsWithdrawn(gameId, msg.sender, withdrawn);
+    }
+    
+    function claimYield(uint256 gameId) 
+        external 
+        nonReentrant 
+        gameExists(gameId) 
+        gameEnded(gameId) 
+    {
+        Game storage game = games[gameId];
+        
+        require(game.winnerSelected, "Winner not selected");
+        require(msg.sender == game.winner, "Only winner can claim yield");
+        require(game.totalYield > 0, "No yield to claim");
+        
+        uint256 yieldAmount = game.totalYield;
+        game.totalYield = 0;
+        
+        // Calculate protocol fee
+        uint256 protocolFee = (yieldAmount * protocolFeePercentage) / 10000;
+        uint256 winnerAmount = yieldAmount - protocolFee;
+        
+        // Transfer yield to winner and fee to protocol
+        if (protocolFee > 0) {
+            IERC20(game.depositToken).safeTransfer(feeRecipient, protocolFee);
+        }
+        IERC20(game.depositToken).safeTransfer(msg.sender, winnerAmount);
+        
+        emit YieldClaimed(gameId, msg.sender, winnerAmount);
+    }
+    
+    function getGameInfo(uint256 gameId) external view returns (GameView memory) {
+        Game storage game = games[gameId];
+        
+        GameView memory gameView = GameView({
+            id: game.id,
+            creator: game.creator,
+            players: game.players,
+            depositToken: game.depositToken,
+            totalDeposited: game.totalDeposited,
+            minimumDeposit: game.minimumDeposit,
+            maximumPlayers: game.maximumPlayers,
+            startTime: game.startTime,
+            duration: game.duration,
+            winner: game.winner,
+            winnerSelected: game.winnerSelected,
+            isActive: game.isActive,
+            totalYield: game.totalYield,
+            metadataURI: game.metadataURI
+        });
+        
+        return gameView;
+    }
+    
+    function getPlayerDeposit(uint256 gameId, address player) external view returns (uint256) {
+        return games[gameId].deposits[player];
+    }
+    
+    function getUserGames(address user) external view returns (uint256[] memory) {
+        return userGames[user];
+    }
+    
+    // Admin functions
+    function setApprovedStrategy(address strategy, bool approved) external onlyOwner {
+        approvedStrategies[strategy] = approved;
+    }
+    
+    function setApprovedToken(address token, bool approved) external onlyOwner {
+        approvedTokens[token] = approved;
+    }
+    
+    function setProtocolFee(uint256 _feePercentage) external onlyOwner {
+        require(_feePercentage <= 1000, "Fee too high"); // Max 10%
+        protocolFeePercentage = _feePercentage;
+    }
+    
+    function setFeeRecipient(address _feeRecipient) external onlyOwner {
+        require(_feeRecipient != address(0), "Invalid address");
+        feeRecipient = _feeRecipient;
+    }
+    
+    // Emergency functions
+    function emergencyWithdraw(uint256 gameId) external nonReentrant {
+        Game storage game = games[gameId];
+        
+        require(game.hasJoined[msg.sender], "Not a player");
+        require(!game.hasWithdrawn[msg.sender], "Already withdrawn");
+        require(block.timestamp > game.startTime + game.duration + 30 days, "Emergency period not reached");
+        
+        uint256 amount = game.deposits[msg.sender];
+        game.hasWithdrawn[msg.sender] = true;
+        
+        // Try to withdraw from strategy, if fails, use contract balance
+        try IYieldStrategy(game.yieldStrategy).withdraw(game.depositToken, amount) returns (uint256 withdrawn) {
+            IERC20(game.depositToken).safeTransfer(msg.sender, withdrawn);
+        } catch {
+            // Fallback to contract balance
+            IERC20(game.depositToken).safeTransfer(msg.sender, amount);
+        }
+        
+        emit FundsWithdrawn(gameId, msg.sender, amount);
+    }
+}
