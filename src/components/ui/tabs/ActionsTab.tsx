@@ -6,28 +6,10 @@ import { ShareButton } from "../Share";
 import { Button } from "../Button";
 import { SignIn } from "../wallet/SignIn";
 import { type Haptics } from "@farcaster/miniapp-sdk";
+import { createGame, joinGame } from '~/lib/gamesStorage';
 
-/**
- * ActionsTab component handles mini app actions like sharing, notifications, and haptic feedback.
- * 
- * This component provides the main interaction interface for users to:
- * - Share the mini app with others
- * - Sign in with Farcaster
- * - Send notifications to their account
- * - Trigger haptic feedback
- * - Add the mini app to their client
- * - Copy share URLs
- * 
- * The component uses the useMiniApp hook to access Farcaster context and actions.
- * All state is managed locally within this component.
- * 
- * @example
- * ```tsx
- * <ActionsTab />
- * ```
- */
 export function ActionsTab() {
-  // --- Hooks ---
+  // --- Original Hooks ---
   const {
     actions,
     added,
@@ -36,23 +18,24 @@ export function ActionsTab() {
     context,
   } = useMiniApp();
   
-  // --- State ---
+  // --- Original State ---
   const [notificationState, setNotificationState] = useState({
     sendStatus: "",
     shareUrlCopied: false,
   });
   const [selectedHapticIntensity, setSelectedHapticIntensity] = useState<Haptics.ImpactOccurredType>('medium');
 
-  // --- Handlers ---
-  /**
-   * Sends a notification to the current user's Farcaster account.
-   * 
-   * This function makes a POST request to the /api/send-notification endpoint
-   * with the user's FID and notification details. It handles different response
-   * statuses including success (200), rate limiting (429), and errors.
-   * 
-   * @returns Promise that resolves when the notification is sent or fails
-   */
+  // --- NEW State for Friends n Funds ---
+  const [showCreateGame, setShowCreateGame] = useState(false);
+  const [showJoinGame, setShowJoinGame] = useState(false);
+  const [gameFormData, setGameFormData] = useState({
+    name: '',
+    duration: '7',
+    depositAmount: '100',
+    inviteCode: ''
+  });
+
+  // --- Original Handlers ---
   const sendFarcasterNotification = useCallback(async () => {
     setNotificationState((prev) => ({ ...prev, sendStatus: "" }));
     if (!notificationDetails || !context) {
@@ -82,12 +65,6 @@ export function ActionsTab() {
     }
   }, [context, notificationDetails]);
 
-  /**
-   * Copies the share URL for the current user to the clipboard.
-   * 
-   * This function generates a share URL using the user's FID and copies it
-   * to the clipboard. It shows a temporary "Copied!" message for 2 seconds.
-   */
   const copyUserShareUrl = useCallback(async () => {
     if (context?.user?.fid) {
       const userShareUrl = `${process.env.NEXT_PUBLIC_URL}/share/${context.user.fid}`;
@@ -97,12 +74,6 @@ export function ActionsTab() {
     }
   }, [context?.user?.fid]);
 
-  /**
-   * Triggers haptic feedback with the selected intensity.
-   * 
-   * This function calls the haptics.impactOccurred method with the current
-   * selectedHapticIntensity setting. It handles errors gracefully by logging them.
-   */
   const triggerHapticFeedback = useCallback(async () => {
     try {
       await haptics.impactOccurred(selectedHapticIntensity);
@@ -111,14 +82,94 @@ export function ActionsTab() {
     }
   }, [haptics, selectedHapticIntensity]);
 
+  // --- NEW Game Handlers with Local Storage ---
+  const handleCreateGame = async () => {
+    try {
+      const game = createGame(
+        gameFormData.name,
+        parseInt(gameFormData.duration),
+        gameFormData.depositAmount,
+        context?.user?.fid || 0
+      );
+      
+      alert(`Game created! Invite code: ${game.id}`);
+      setShowCreateGame(false);
+      setGameFormData({ ...gameFormData, name: '' });
+      
+      // Optionally navigate to home to see the new game
+      window.location.href = '/';
+    } catch (error) {
+      alert('Failed to create game');
+    }
+  };
+
+  const handleJoinGame = async () => {
+    try {
+      const game = joinGame(
+        gameFormData.inviteCode,
+        context?.user?.fid || 0
+      );
+      
+      if (game) {
+        alert(`Joined ${game.name}! Deposit ${game.depositAmount} to start playing.`);
+        setShowJoinGame(false);
+        setGameFormData({ ...gameFormData, inviteCode: '' });
+        
+        // Optionally navigate to home to see the game
+        window.location.href = '/';
+      } else {
+        alert('Invalid game code or already joined');
+      }
+    } catch (error) {
+      alert('Failed to join game');
+    }
+  };
+
   // --- Render ---
   return (
     <div className="space-y-3 px-6 w-full max-w-md mx-auto">
+      {/* Friends n Funds Game Actions Section */}
+      <div className="border-b pb-6 mb-6">
+        <h3 className="text-lg font-semibold mb-3">🎮 Game Actions</h3>
+        <div className="space-y-3">
+          <button 
+            onClick={() => setShowCreateGame(true)} 
+            className="w-full bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-medium transition-colors"
+          >
+            Create New Game
+          </button>
+          
+          <button 
+            onClick={() => setShowJoinGame(true)} 
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-lg font-medium transition-colors"
+          >
+            Join Game
+          </button>
+          
+          <button 
+            onClick={() => window.location.href = '/'} 
+            className="w-full bg-green-600 hover:bg-green-700 text-white p-3 rounded-lg font-medium transition-colors"
+          >
+            View My Active Games
+          </button>
+          
+          <button 
+            onClick={() => alert('Coming soon!')} 
+            className="w-full bg-yellow-600 hover:bg-yellow-700 text-white p-3 rounded-lg font-medium transition-colors"
+          >
+            Claim Winnings
+          </button>
+        </div>
+      </div>
+
+      {/* Add a header for the original actions */}
+      <h3 className="text-lg font-semibold mb-3">🚀 Mini App Features</h3>
+
       {/* Share functionality */}
       <ShareButton 
         buttonText="Share Mini App"
         cast={{
-          text: "Check out this awesome frame @1 @2 @3! 🚀🪐",
+          text: "Join me on Friends n Funds - compete for yield with friends! 💰🎮",
           bestFriends: true,
           embeds: [`${process.env.NEXT_PUBLIC_URL}/share/${context?.user?.fid || ''}`]
         }}
@@ -177,6 +228,107 @@ export function ActionsTab() {
           Trigger Haptic Feedback
         </Button>
       </div>
+
+      {/* Create Game Modal */}
+      {showCreateGame && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-xl font-bold mb-4">Create New Game</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Game Name</label>
+                <input
+                  type="text"
+                  value={gameFormData.name}
+                  onChange={(e) => setGameFormData({...gameFormData, name: e.target.value})}
+                  placeholder="Weekend Warriors"
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium mb-2">Duration</label>
+                <select 
+                  value={gameFormData.duration}
+                  onChange={(e) => setGameFormData({...gameFormData, duration: e.target.value})}
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                >
+                  <option value="3">3 days</option>
+                  <option value="7">7 days</option>
+                  <option value="14">14 days</option>
+                  <option value="30">30 days</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium mb-2">Deposit Amount (USDC)</label>
+                <input
+                  type="number"
+                  value={gameFormData.depositAmount}
+                  onChange={(e) => setGameFormData({...gameFormData, depositAmount: e.target.value})}
+                  placeholder="100"
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                />
+              </div>
+            </div>
+            
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={() => setShowCreateGame(false)}
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleCreateGame}
+                disabled={!gameFormData.name}
+                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Create Game
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Join Game Modal */}
+      {showJoinGame && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-xl font-bold mb-4">Join Game</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Game Code</label>
+                <input
+                  type="text"
+                  value={gameFormData.inviteCode}
+                  onChange={(e) => setGameFormData({...gameFormData, inviteCode: e.target.value})}
+                  placeholder="Enter invite code..."
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                />
+              </div>
+            </div>
+            
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={() => setShowJoinGame(false)}
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleJoinGame}
+                disabled={!gameFormData.inviteCode}
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Join Game
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-} 
+}
