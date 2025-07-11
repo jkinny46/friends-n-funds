@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+interface ILendingPool {
+    function deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
+    function withdraw(address asset, uint256 amount, address to) external returns (uint256);
+}
+
+interface IAToken {
+    function balanceOf(address user) external view returns (uint256);
+}
+
+interface IYieldStrategy {
+    function deposit(address token, uint256 amount) external;
+    function withdraw(address token, uint256 amount) external returns (uint256);
+    function getBalance(address token) external view returns (uint256);
+    function claimYield(address token) external returns (uint256);
+}
+
+contract AaveYieldStrategy is IYieldStrategy, Ownable {
+    using SafeERC20 for IERC20;
+    
+    ILendingPool public immutable lendingPool;
+    mapping(address => address) public aTokens; // underlying token => aToken
+    mapping(address => uint256) public totalDeposited;
+    mapping(address => bool) public supportedTokens;
+    
+    address public friendsAndFundsContract;
+    
+    event Deposited(address indexed token, uint256 amount);
+    event Withdrawn(address indexed token, uint256 amount);
+    event YieldClaimed(address indexed token, uint256 amount);
+    
+    modifier onlyFriendsAndFunds() {
+        require(msg.sender == friendsAndFundsContract, "Only FriendsAndFunds");
+        _;
+    }
+    
+    constructor(address _lendingPool) {
+        lendingPool = ILendingPool(_lendingPool);
+    }
+    
+    function setFriendsAndFundsContract(address _contract) external onlyOwner {
+        friendsAndFundsContract = _contract;
+    }
+    
+    function addSupportedToken(address token, address aToken) external onlyOwner {
+        supportedTokens[token] = true;
+        aTokens[token] = aToken;
+    }
+    
+    function deposit(address token, uint256 amount) external override onlyFriendsAndFunds {
+        require(supportedTokens[token], "Token not supported");
+        
+        // Transfer tokens from FriendsAndFunds contract
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        
+        // Approve Aave to spend tokens
+        IERC20(token).safeApprove(address(lendingPool), amount);
+        
+        // Deposit to Aave
+        lendingPool.deposit(token, amount, address(this), 0);
+        
+        totalDeposited[token] += amount;
+        
+        emit Deposited(token, amount);
+    }
+    
+    function withdraw(address token, uint256 amount) external override onlyFriendsAndFunds returns (uint256) {
+        require(supportedTokens[token], "Token not supported");
+        
+        // Withdraw from Aave
+        uint256 withdrawn = lendingPool.withdraw(token, amount, msg.sender);
+        
+        totalDeposited[token] -= amount;
+        
+        emit Withdrawn(token, withdrawn);
+        
+        return withdrawn;
+    }
+    
+    function getBalance(address token) external view override returns (uint256) {
+        require(supportedTokens[token], "Token not supported");
+        
+        address aToken = aTokens[token];
+        return IAToken(aToken).balanceOf(address(this));
+    }
+    
+    function claimYield(address token) external override onlyFriendsAndFunds returns (uint256) {
+        require(supportedTokens[token], "Token not supported");
+        
+        address aToken = aTokens[token];
+        uint256 currentBalance = IAToken(aToken).balanceOf(address(this));
+        uint256 yield = 0;
+        
+        if (currentBalance > totalDeposited[token]) {
+            yield = currentBalance - totalDeposited[token];
+            
+            // Withdraw yield amount
+            lendingPool.withdraw(token, yield, msg.sender);
+            
+            emit YieldClaimed(token, yield);
+        }
+        
+        return yield;
+    }
+    
+    // Emergency function
+    function emergencyWithdraw(address token, uint256 amount, address to) external onlyOwner {
+        lendingPool.withdraw(token, amount, to);
+    }
+}
