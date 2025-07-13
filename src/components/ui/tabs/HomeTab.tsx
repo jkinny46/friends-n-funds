@@ -11,10 +11,13 @@ export function HomeTab() {
 
   useEffect(() => {
     // Load games for current user
-    if (context?.user?.fid) {
-      const userGames = getUserGames(context.user.fid);
-      setGames(userGames);
-    }
+    const loadGames = async () => {
+      if (context?.user?.fid) {
+        const userGames = await getUserGames(context.user.fid);
+        setGames(userGames);
+      }
+    };
+    loadGames();
   }, [context?.user?.fid]);
 
   // Calculate totals
@@ -98,17 +101,16 @@ export function HomeTab() {
                   gameId={game.id}
                   depositAmount={game.deposit_amount.toString()}
                   playerFid={context?.user?.fid || 0}
-                  onSuccess={() => {
+                  onSuccess={async () => {
                     // Refresh games
                     if (context?.user?.fid) {
-                      const userGames = getUserGames(context.user.fid);
+                      const userGames = await getUserGames(context.user.fid);
                       setGames(userGames);
                     }
                   }}
                 />
               </div>
             )}
-            </div>
           </div>
         ))}
       </div>
