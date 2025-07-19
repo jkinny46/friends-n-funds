@@ -1,13 +1,13 @@
-"use client";
+"use client"; 
 
+import { supabase } from '../../../lib/supabase';
 import { useCallback, useState } from "react";
 import { useMiniApp } from "@neynar/react";
 import { ShareButton } from "../Share";
 import { Button } from "../Button";
 import { SignIn } from "../wallet/SignIn";
 import { type Haptics } from "@farcaster/miniapp-sdk";
-import { createGame, joinGame } from '~/lib/gamesStorage';
-
+import { createGame, Game, joinGame } from '../../../lib/gameStorageSupabase';
 export function ActionsTab() {
   // --- Original Hooks ---
   const {
@@ -34,6 +34,9 @@ export function ActionsTab() {
     depositAmount: '100',
     inviteCode: ''
   });
+
+  // --- NEW State for All Games (Dev) ---
+  const [allGames, setAllGames] = useState<Game[]>([]);
 
   // --- Original Handlers ---
   const sendFarcasterNotification = useCallback(async () => {
@@ -82,40 +85,63 @@ export function ActionsTab() {
     }
   }, [haptics, selectedHapticIntensity]);
 
-  // --- NEW Game Handlers with Local Storage ---
-  const handleCreateGame = async () => {
+  // // --- NEW Game Handlers with Local Storage ---
+  // const handleCreateGame = async () => {
+  //   try {
+  //     const game = await createGame(
+  //       gameFormData.name,
+  //       parseInt(gameFormData.duration),
+  //       gameFormData.depositAmount,
+  //       context?.user?.fid || 0
+  //     );
+      
+  //     if (game) {
+  //       alert(`Game created! Invite code: ${game.invite_code}`);
+  //       setShowCreateGame(false);
+  //       setGameFormData({ ...gameFormData, name: '' });
+  //       window.location.href = '/';
+  //     } else {
+  //       alert('Failed to create game');
+  //     }
+  //   } catch (error) {
+  //     alert('Failed to create game');
+  //   }
+  // };
+
+  async function getUserGames(userFid: number): Promise<Game[]> {
     try {
-      const game = createGame(
-        gameFormData.name,
-        parseInt(gameFormData.duration),
-        gameFormData.depositAmount,
-        context?.user?.fid || 0
-      );
+      console.log("Fetching games for FID:", userFid);
       
-      alert(`Game created! Invite code: ${game.id}`);
-      setShowCreateGame(false);
-      setGameFormData({ ...gameFormData, name: '' });
+      // Get ALL games for now since FIDs are 0
+      const { data: games, error } = await supabase
+        .from('games')
+        .select('*')
+        .order('created_at', { ascending: false });
+        
+      if (error) {
+        console.error("Error fetching games:", error);
+        return [];
+      }
       
-      // Optionally navigate to home to see the new game
-      window.location.href = '/';
+      // Return all games for testing
+      return games || [];
     } catch (error) {
-      alert('Failed to create game');
+      console.error('Error in getUserGames:', error);
+      return [];
     }
-  };
+  }
 
   const handleJoinGame = async () => {
     try {
-      const game = joinGame(
+      const game = await joinGame(
         gameFormData.inviteCode,
         context?.user?.fid || 0
       );
       
       if (game) {
-        alert(`Joined ${game.name}! Deposit ${game.depositAmount} to start playing.`);
+        alert(`Joined ${game.name}! Deposit ${game.deposit_amount} to start playing.`);
         setShowJoinGame(false);
         setGameFormData({ ...gameFormData, inviteCode: '' });
-        
-        // Optionally navigate to home to see the game
         window.location.href = '/';
       } else {
         alert('Invalid game code or already joined');
@@ -125,9 +151,54 @@ export function ActionsTab() {
     }
   };
 
+  const handleCreateGame = async () => {
+    try {
+      const game = await createGame(
+        gameFormData.name,
+        parseInt(gameFormData.duration),
+        gameFormData.depositAmount,
+        context?.user?.fid || 0
+      );
+      
+      if (game) {
+        alert(`Game created! Invite code: ${game.invite_code}`);
+        setShowCreateGame(false);
+        setGameFormData({ ...gameFormData, name: '' });
+        window.location.href = '/';
+      } else {
+        alert('Failed to create game');
+      }
+    } catch (error) {
+      alert('Failed to create game');
+    }
+  };
+
+  async function fetchAllGames() {
+    const { data: games, error } = await supabase
+      .from('games')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (!error) setAllGames(games || []);
+  }
+
   // --- Render ---
   return (
     <div className="space-y-3 px-6 w-full max-w-md mx-auto">
+      {/* DEV: Show All Games Button and List */}
+      <button onClick={fetchAllGames} className="mb-2 p-2 bg-gray-300 rounded">
+        Show All Games (Dev)
+      </button>
+      {allGames.length > 0 && (
+        <ul className="mb-4">
+          {allGames.map(game => (
+            <li key={game.id} className="mb-2 p-2 border rounded">
+              <div><strong>{game.name}</strong> ({game.status})</div>
+              <div>Deposit: {game.deposit_amount} USDC</div>
+              <div>Invite Code: {game.invite_code}</div>
+            </li>
+          ))}
+        </ul>
+      )}
       {/* Friends n Funds Game Actions Section */}
       <div className="border-b pb-6 mb-6">
         <h3 className="text-lg font-semibold mb-3">🎮 Game Actions</h3>
@@ -227,6 +298,35 @@ export function ActionsTab() {
         >
           Trigger Haptic Feedback
         </Button>
+
+        // Add this button in your ActionsTab return statement, maybe after the game buttons:
+<button 
+  onClick={async () => {
+    console.log("Testing Supabase connection...");
+    
+    // Test 1: Check if we can connect
+    const { data: test1, error: error1 } = await supabase
+      .from('games')
+      .select('count');
+    console.log("Connection test:", { test1, error1 });
+    
+    // Test 2: Try to insert a game directly
+    const { data: test2, error: error2 } = await supabase
+      .from('games')
+      .insert({
+        name: "Test Game",
+        duration_days: 7,
+        deposit_amount: 100,
+        creator_fid: 123
+      })
+      .select();
+    console.log("Insert test:", { test2, error2 });
+  }}
+  className="w-full bg-gray-600 hover:bg-gray-700 text-white p-3 rounded-lg font-medium transition-colors"
+>
+  Debug Supabase Connection
+</button>
+
       </div>
 
       {/* Create Game Modal */}
