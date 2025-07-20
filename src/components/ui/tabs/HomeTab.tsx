@@ -4,21 +4,50 @@ import { useState, useEffect } from "react";
 import { getUserGames } from '~/lib/gameStorageSupabase';
 import { useMiniApp } from "@neynar/react";
 import { GameDeposit } from '~/components/GameDeposit';
+import { supabase } from "~/lib/supabase";
 
 export function HomeTab() {
   const { context } = useMiniApp();
   const [games, setGames] = useState<any[]>([]);
 
   useEffect(() => {
-    // Load games for current user
     const loadGames = async () => {
-      if (context?.user?.fid) {
-        const userGames = await getUserGames(context.user.fid);
-        setGames(userGames);
+      try {
+        // For production without Farcaster context, just load ALL games
+        const { data: allGames, error } = await supabase
+          .from('games')
+          .select('*')
+          .order('created_at', { ascending: false });
+        
+        console.log("Loaded games:", allGames);
+        
+        if (error) {
+          console.error("Error loading games:", error);
+          setDebugInfo(`Error: ${error.message}`);
+          return;
+        }
+        
+        setDebugInfo(`Loaded ${allGames?.length || 0} games`);
+        setGames(allGames || []);
+        
+      } catch (error) {
+        setDebugInfo(`Error: ${error}`);
+        console.error("Error:", error);
       }
     };
+    
     loadGames();
-  }, [context?.user?.fid]);
+  }, []); // No dependencies - just load on mount
+  // useEffect(() => {
+  //   // Load games for current user
+  //   const loadGames = async () => {
+  //     if (context?.user?.fid) {
+  //       const userGames = await getUserGames(context.user.fid);
+  //       setGames(userGames);
+  //     }
+  //   };
+  //   loadGames();
+  // }, [context?.user?.fid]);
 
   // Calculate totals
   const totalDeposited = games.reduce((sum, game) => {
@@ -124,4 +153,8 @@ export function HomeTab() {
       )}
     </div>
   );
+}
+
+function setDebugInfo(arg0: string) {
+  throw new Error("Function not implemented.");
 }
