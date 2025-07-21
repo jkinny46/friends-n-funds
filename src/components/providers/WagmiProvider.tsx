@@ -1,13 +1,13 @@
 import { createConfig, http, WagmiProvider } from "wagmi";
-import { base, degen, mainnet, optimism, unichain, celo } from "wagmi/chains";
+import { sepolia, baseSepolia } from "wagmi/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { farcasterFrame } from "@farcaster/miniapp-wagmi-connector";
-import { coinbaseWallet, metaMask } from 'wagmi/connectors';
+import { coinbaseWallet, metaMask, injected } from 'wagmi/connectors';
 import { APP_NAME, APP_ICON_URL, APP_URL } from "~/lib/constants";
 import { useEffect, useState } from "react";
-import { useConnect, useAccount } from "wagmi";
+import { useConnect, useAccount, useChainId } from "wagmi";
 import React from "react";
-import { RainbowKitProvider, getDefaultConfig } from '@rainbow-me/rainbowkit';
+import { RainbowKitProvider } from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
 
 // Custom hook for Coinbase Wallet detection and auto-connection
@@ -44,17 +44,14 @@ function useCoinbaseWalletAutoConnect() {
 }
 
 export const config = createConfig({
-  chains: [base, optimism, mainnet, degen, unichain, celo],
+  chains: [sepolia, baseSepolia],
   transports: {
-    [base.id]: http(),
-    [optimism.id]: http(),
-    [mainnet.id]: http(),
-    [degen.id]: http(),
-    [unichain.id]: http(),
-    [celo.id]: http(),
+    [sepolia.id]: http(),
+    [baseSepolia.id]: http(),
   },
   connectors: [
     farcasterFrame(),
+    injected({ shimDisconnect: true }), // For Phantom, MetaMask, etc.
     coinbaseWallet({
       appName: APP_NAME,
       appLogoUrl: APP_ICON_URL,
@@ -77,13 +74,24 @@ function CoinbaseWalletAutoConnect({ children }: { children: React.ReactNode }) 
   return <>{children}</>;
 }
 
+function TestnetWarning({ children }: { children: React.ReactNode }) {
+  const chainId = useChainId();
+  const supported = chainId === sepolia.id || chainId === baseSepolia.id;
+  if (!supported) {
+    return <div style={{ color: 'red', padding: 16, fontWeight: 'bold' }}>Please switch your wallet to Sepolia or Base Sepolia testnet to use this app.</div>;
+  }
+  return <>{children}</>;
+}
+
 export default function Provider({ children }: { children: React.ReactNode }) {
   return (
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider>
           <CoinbaseWalletAutoConnect>
-            {children}
+            <TestnetWarning>
+              {children}
+            </TestnetWarning>
           </CoinbaseWalletAutoConnect>
         </RainbowKitProvider>
       </QueryClientProvider>
