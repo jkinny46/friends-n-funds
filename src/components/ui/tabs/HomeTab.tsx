@@ -5,6 +5,7 @@ import { useMiniApp } from "@neynar/react";
 import { GameDeposit } from '~/components/GameDeposit';
 import { supabase } from "~/lib/supabase";
 import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { DepositToVault } from "../../DepositToVault";
 
 export function HomeTab() {
   const { context } = useMiniApp();
@@ -42,6 +43,7 @@ export function HomeTab() {
 
   return (
     <div className="flex flex-col gap-6 p-4">
+      <DepositToVault />
       {/* Wallet Connect Button */}
       <div className="mb-4">
         <ConnectButton />
