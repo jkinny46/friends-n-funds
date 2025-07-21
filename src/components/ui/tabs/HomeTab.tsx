@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useMiniApp } from "@neynar/react";
 import { GameDeposit } from '~/components/GameDeposit';
 import { supabase } from "~/lib/supabase";
+import { ConnectButton } from '@rainbow-me/rainbowkit';
 
 export function HomeTab() {
   const { context } = useMiniApp();
@@ -41,6 +42,10 @@ export function HomeTab() {
 
   return (
     <div className="flex flex-col gap-6 p-4">
+      {/* Wallet Connect Button */}
+      <div className="mb-4">
+        <ConnectButton />
+      </div>
       {/* Header */}
       <div className="text-center">
         <h2 className="text-2xl font-bold mb-2">Your Active Games</h2>

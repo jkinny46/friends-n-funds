@@ -7,6 +7,8 @@ import { APP_NAME, APP_ICON_URL, APP_URL } from "~/lib/constants";
 import { useEffect, useState } from "react";
 import { useConnect, useAccount } from "wagmi";
 import React from "react";
+import { RainbowKitProvider, getDefaultConfig } from '@rainbow-me/rainbowkit';
+import '@rainbow-me/rainbowkit/styles.css';
 
 // Custom hook for Coinbase Wallet detection and auto-connection
 function useCoinbaseWalletAutoConnect() {
@@ -79,9 +81,11 @@ export default function Provider({ children }: { children: React.ReactNode }) {
   return (
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
-        <CoinbaseWalletAutoConnect>
-          {children}
-        </CoinbaseWalletAutoConnect>
+        <RainbowKitProvider>
+          <CoinbaseWalletAutoConnect>
+            {children}
+          </CoinbaseWalletAutoConnect>
+        </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );
